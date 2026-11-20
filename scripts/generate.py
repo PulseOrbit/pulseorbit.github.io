@@ -71,7 +71,7 @@ def gemini_json(prompt):
             try:
                 response = SESSION.post(endpoint, params={"key": API_KEY}, json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 7000}
+                    "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 8192}
                 }, timeout=120)
                 if response.status_code in transient_statuses:
                     detail = response.text[:800]
@@ -85,19 +85,22 @@ def gemini_json(prompt):
                     raise RuntimeError("Gemini returned no candidates. Check API quota, safety filtering, and model availability.")
                 parts = candidates[0].get("content", {}).get("parts", [])
                 raw = "".join(part.get("text", "") for part in parts)
-                match = re.search(r"\\{.*\\}", raw, re.S)
+                match = re.search(r"\{.*\}", raw, re.S)
                 if not match:
-                    raise ValueError(f"Gemini did not return valid JSON. Response preview: {raw[:500]}")
+                    finish_reason = candidates[0].get("finishReason", "unknown")
+                    failures.append(f"{model} attempt {attempt}: no complete JSON (finishReason={finish_reason})")
+                    print(f"Gemini {model} returned incomplete JSON (finishReason={finish_reason}); retrying.")
+                    continue
                 try:
                     return json.loads(match.group(0))
                 except json.JSONDecodeError as exc:
-                    raise ValueError(f"Gemini returned malformed JSON: {exc}") from exc
+                    failures.append(f"{model} attempt {attempt}: malformed JSON ({exc})")
+                    print(f"Gemini {model} returned malformed JSON; retrying.")
+                    continue
             except requests.RequestException as exc:
                 failures.append(f"{model} attempt {attempt}: {exc}")
                 print(f"Gemini {model} network error: {exc}")
                 continue
-            except Exception:
-                raise
         print(f"Gemini model {model} exhausted retries; trying another available model.")
     summary = " | ".join(failures[-8:])
     raise RuntimeError(f"All available Gemini models failed after retries. Last errors: {summary}")
