@@ -78,91 +78,37 @@ def plain(value):
     return html.unescape(re.sub(r"<[^>]*>", "", str(value or ""))).strip()
 
 def upload_image(image_bytes, slug, content_type, attribution):
-    ext = mimetypes.guess_extension(content_type) or ".jpg"
-    if ext == ".jpe": ext = ".jpg"
+    if not HF_TOKEN: return None
+    ext = mimetypes.guess_extension(content_type) or '.jpg'
+    if ext == '.jpe': ext = '.jpg'
     digest = hashlib.sha256(image_bytes).hexdigest()[:12]
-    filename = f"{slug[:55]}-{digest}{ext}"
-    if HF_TOKEN:
-        api = HfApi(token=HF_TOKEN)
-        api.upload_file(path_or_fileobj=image_bytes, path_in_repo=f"images/{filename}",
-                        repo_id=HF_DATASET_REPO, repo_type="dataset",
-                        commit_message=f"Add licensed article image {slug[:55]}")
-        metadata = json.dumps(attribution, ensure_ascii=False, indent=2).encode("utf-8")
-        api.upload_file(path_or_fileobj=metadata, path_in_repo=f"metadata/{filename}.json",
-                        repo_id=HF_DATASET_REPO, repo_type="dataset",
-                        commit_message=f"Add image attribution metadata {slug[:55]}")
-        return f"https://huggingface.co/datasets/{HF_DATASET_REPO}/resolve/main/images/{quote(filename)}", "huggingface"
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    (IMAGE_DIR / filename).write_bytes(image_bytes)
-    return f"/assets/images/posts/{quote(filename)}", "repository"
+    filename = f'{slug[:55]}-{digest}{ext}'
+    api = HfApi(token=HF_TOKEN)
+    api.upload_file(path_or_fileobj=image_bytes, path_in_repo=f'images/{filename}', repo_id=HF_DATASET_REPO, repo_type='dataset', commit_message=f'Add licensed article image {slug[:55]}')
+    metadata = json.dumps(attribution, ensure_ascii=False, indent=2).encode('utf-8')
+    api.upload_file(path_or_fileobj=metadata, path_in_repo=f'metadata/{filename}.json', repo_id=HF_DATASET_REPO, repo_type='dataset', commit_message=f'Add image attribution metadata {slug[:55]}')
+    return f'https://huggingface.co/datasets/{HF_DATASET_REPO}/resolve/main/images/{quote(filename)}', 'huggingface'
 
-def pixabay_image(topic, slug):
-    """Search one focused query, cache its API response for 24 hours, then download locally.
-    Pixabay image files are used in the context of their article, never mirrored to the public HF dataset.
-    """
-    if not PIXABAY_API_KEY:
-        print("PIXABAY_API_KEY is not configured; using Wikimedia Commons fallback.")
-        return None
-    query = re.sub(r"[^a-zA-Z0-9 ,'-]", " ", str(topic or ""))[:100].strip()
-    if not query:
-        return None
-    cache_key = hashlib.sha256(query.casefold().encode("utf-8")).hexdigest()
-    cache_file = PIXABAY_CACHE_DIR / f"{cache_key}.json"
-    payload = None
+def pixabay_search_topic(topic):
+    if not PIXABAY_API_KEY: return str(topic or '').strip()
+    query = re.sub(r'[^a-zA-Z0-9 ,\'-]', ' ', str(topic or ''))[:100].strip()
+    if not query: return str(topic or '').strip()
+    cache_key = hashlib.sha256(query.casefold().encode('utf-8')).hexdigest()
+    cache_file = PIXABAY_CACHE_DIR / f'{cache_key}.json'
     try:
+        payload = None
         if cache_file.exists():
-            cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            fetched = datetime.datetime.fromisoformat(cached.get("fetched_at", ""))
-            if (datetime.datetime.now(datetime.timezone.utc) - fetched).total_seconds() < 86400:
-                payload = cached.get("response")
+            cached = json.loads(cache_file.read_text(encoding='utf-8'))
+            fetched = datetime.datetime.fromisoformat(cached.get('fetched_at', ''))
+            if (datetime.datetime.now(datetime.timezone.utc)-fetched).total_seconds()<86400: payload=cached.get('response')
         if payload is None:
-            response = checked(SESSION.get("https://pixabay.com/api/", params={
-                "key": PIXABAY_API_KEY, "q": query, "lang": "en",
-                "image_type": "photo", "orientation": "horizontal",
-                "safesearch": "true", "per_page": 12, "order": "popular"
-            }, timeout=35), "Pixabay image search")
-            payload = response.json()
-            PIXABAY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps({
-                "query": query,
-                "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "response": payload
-            }, ensure_ascii=False), encoding="utf-8")
-        hits = payload.get("hits") or []
-        if not hits:
-            print(f"Pixabay returned no image results for: {query}")
-            return None
-        for hit in hits[:12]:
-            page_url = hit.get("pageURL", "")
-            image_url = hit.get("largeImageURL") or hit.get("webformatURL")
-            if not page_url.startswith("https://pixabay.com/") or not image_url.startswith("https://"):
-                continue
-            try:
-                downloaded = checked(SESSION.get(image_url, timeout=45), "Pixabay image download")
-                content_type = downloaded.headers.get("Content-Type", "").split(";")[0].lower()
-                if not content_type.startswith("image/") or len(downloaded.content) > MAX_IMAGE_BYTES:
-                    continue
-                ext = mimetypes.guess_extension(content_type) or ".jpg"
-                if ext == ".jpe": ext = ".jpg"
-                digest = hashlib.sha256(downloaded.content).hexdigest()[:12]
-                filename = f"{slug[:55]}-{digest}{ext}"
-                IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-                (IMAGE_DIR / filename).write_bytes(downloaded.content)
-                creator = str(hit.get("user") or "Pixabay contributor")
-                return {
-                    "url": f"/assets/images/posts/{quote(filename)}",
-                    "page": page_url,
-                    "credit": creator,
-                    "license": "Pixabay Content License",
-                    "license_url": PIXABAY_LICENSE_URL,
-                    "storage": "repository"
-                }
-            except Exception as exc:
-                print(f"Skipping a Pixabay result for '{query}': {exc}")
-        print(f"Pixabay results were not downloadable for: {query}")
+            response=checked(SESSION.get('https://pixabay.com/api/',params={'key':PIXABAY_API_KEY,'q':query,'lang':'en','image_type':'photo','orientation':'horizontal','safesearch':'true','per_page':12,'order':'popular'},timeout=35),'Pixabay image search')
+            payload=response.json(); PIXABAY_CACHE_DIR.mkdir(parents=True,exist_ok=True)
+            cache_file.write_text(json.dumps({'query':query,'fetched_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'response':payload},ensure_ascii=False),encoding='utf-8')
+        hits=payload.get('hits') or []; tags=str(hits[0].get('tags') or '').strip() if hits else ''
+        return f'{query} {tags[:100]}' if tags else query
     except Exception as exc:
-        print(f"Pixabay search warning for '{query}': {exc}")
-    return None
+        print(f'Pixabay discovery warning: {exc}'); return query
 
 def commons_image(topic, slug):
     api = "https://commons.wikimedia.org/w/api.php"
@@ -191,7 +137,9 @@ def commons_image(topic, slug):
                 "license": license_name, "license_url": (meta.get("LicenseUrl") or {}).get("value", ""),
                 "source_page": page_url, "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
             }
-            url, storage = upload_image(image_response.content, slug, content_type, attribution)
+            uploaded = upload_image(image_response.content, slug, content_type, attribution)
+            if not uploaded: return None
+            url, storage = uploaded
             return {"url": url, "page": page_url, "credit": attribution["creator"],
                     "license": license_name, "license_url": attribution["license_url"], "storage": storage}
         print(f"No suitable freely reusable Commons image found for: {topic}")
@@ -256,7 +204,8 @@ def main():
         if slug in slugs: slug += "-" + hashlib.sha1(trend["title"].encode()).hexdigest()[:6]
         slugs.add(slug)
         image_topic = str(article.get("image_query") or trend["title"])
-        image = pixabay_image(image_topic, slug) or commons_image(image_topic, slug)
+        discovery_topic = pixabay_search_topic(image_topic)
+        image = commons_image(discovery_topic, slug)
         category = article.get("category")
         if category not in {"Technology", "Science", "Business", "Culture"}: category = "Culture"
         new_posts.append({
