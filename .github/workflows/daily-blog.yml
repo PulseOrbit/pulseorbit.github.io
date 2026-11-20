@@ -18,8 +18,10 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+      - name: Validate dependency manifest
+        run: python -c 'from pathlib import Path; lines=Path("requirements.txt").read_text().splitlines(); assert len([x for x in lines if x.strip()]) >= 2; assert all("\\\\n" not in x for x in lines); print("Dependency manifest valid")'
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
       - name: Validate Python and JavaScript
         run: python -m compileall -q scripts && node --check assets/js/app.js
       - name: Generate articles and upload licensed images to Hugging Face
