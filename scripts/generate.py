@@ -41,7 +41,7 @@ def get_trends():
 def available_models():
     response = checked(SESSION.get(f"{BASE}/models", params={"key": API_KEY, "pageSize": 1000}, timeout=30), "Gemini model discovery")
     usable = {m.get("name", "").removeprefix("models/") for m in response.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])}
-    preferred = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+    preferred = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
     ordered = [m for m in preferred if m in usable] + sorted(usable - set(preferred))
     if MODEL_OVERRIDE:
         override = MODEL_OVERRIDE.removeprefix("models/")
@@ -61,6 +61,11 @@ def gemini_json(prompt):
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 8192}
                 }, timeout=120)
+                if response.status_code in (400, 401, 403, 404):
+                    try: detail = response.json().get("error", {}).get("message", response.text[:500])
+                    except Exception: detail = response.text[:500]
+                    failures.append(f"{model}: HTTP {response.status_code} ({detail})")
+                    break
                 if response.status_code in (429, 500, 502, 503, 504):
                     failures.append(f"{model}: HTTP {response.status_code}")
                     continue
@@ -113,37 +118,42 @@ def pixabay_search_topic(topic):
 
 def commons_image(topic, slug):
     api = "https://commons.wikimedia.org/w/api.php"
+    raw_topic = str(topic or "").strip()
+    words = [w for w in re.findall(r"[A-Za-z0-9]{3,}", raw_topic) if w.lower() not in {"the", "and", "with", "from", "about", "image", "photo"}]
+    queries = list(dict.fromkeys([raw_topic[:180], " ".join(words[:6])[:140], " ".join(words[:3])[:100]]))
     try:
-        response = checked(SESSION.get(api, params={
-            "action": "query", "format": "json", "generator": "search",
-            "gsrsearch": str(topic)[:180], "gsrnamespace": 6, "gsrlimit": 12,
-            "prop": "imageinfo", "iiprop": "url|extmetadata|mime", "iiurlwidth": 1400
-        }, timeout=35), "Wikimedia Commons search")
-        pages = sorted(response.json().get("query", {}).get("pages", {}).values(), key=lambda p: p.get("index", 999))
-        for page in pages:
-            info = (page.get("imageinfo") or [{}])[0]
-            meta = info.get("extmetadata") or {}
-            license_name = plain((meta.get("LicenseShortName") or {}).get("value"))
-            lic = license_name.lower().strip()
-            allowed = lic.startswith("cc0") or "public domain" in lic or bool(re.match(r"^cc by(?:-sa)?(?:\s|$)", lic))
-            image_url, page_url = info.get("thumburl") or info.get("url"), info.get("descriptionurl", "")
-            mime = (info.get("mime") or "").lower()
-            if not allowed or not image_url or not page_url or not mime.startswith("image/"): continue
-            image_response = checked(SESSION.get(image_url, timeout=45), "Commons image download")
-            content_type = image_response.headers.get("Content-Type", "").split(";")[0].lower()
-            if not content_type.startswith("image/") or len(image_response.content) > MAX_IMAGE_BYTES: continue
-            attribution = {
-                "title": plain(page.get("title")),
-                "creator": plain((meta.get("Artist") or {}).get("value")) or "Wikimedia Commons contributor",
-                "license": license_name, "license_url": (meta.get("LicenseUrl") or {}).get("value", ""),
-                "source_page": page_url, "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-            }
-            uploaded = upload_image(image_response.content, slug, content_type, attribution)
-            if not uploaded: return None
-            url, storage = uploaded
-            return {"url": url, "page": page_url, "credit": attribution["creator"],
-                    "license": license_name, "license_url": attribution["license_url"], "storage": storage}
-        print(f"No suitable freely reusable Commons image found for: {topic}")
+        for search_term in queries:
+            if not search_term: continue
+            response = checked(SESSION.get(api, params={
+                "action": "query", "format": "json", "generator": "search",
+                "gsrsearch": search_term, "gsrnamespace": 6, "gsrlimit": 30,
+                "prop": "imageinfo", "iiprop": "url|extmetadata|mime", "iiurlwidth": 1400
+            }, timeout=35), "Wikimedia Commons search")
+            pages = sorted(response.json().get("query", {}).get("pages", {}).values(), key=lambda p: p.get("index", 999))
+            for page in pages:
+                info = (page.get("imageinfo") or [{}])[0]
+                meta = info.get("extmetadata") or {}
+                license_name = plain((meta.get("LicenseShortName") or {}).get("value"))
+                lic = license_name.lower().strip()
+                allowed = lic.startswith("cc0") or "public domain" in lic or bool(re.match(r"^cc by(?:-sa)?(?:\s|$)", lic))
+                image_url, page_url = info.get("thumburl") or info.get("url"), info.get("descriptionurl", "")
+                mime = (info.get("mime") or "").lower()
+                if not allowed or not image_url or not page_url or not mime.startswith("image/"): continue
+                image_response = checked(SESSION.get(image_url, timeout=45), "Commons image download")
+                content_type = image_response.headers.get("Content-Type", "").split(";")[0].lower()
+                if not content_type.startswith("image/") or len(image_response.content) > MAX_IMAGE_BYTES: continue
+                attribution = {
+                    "title": plain(page.get("title")),
+                    "creator": plain((meta.get("Artist") or {}).get("value")) or "Wikimedia Commons contributor",
+                    "license": license_name, "license_url": (meta.get("LicenseUrl") or {}).get("value", ""),
+                    "source_page": page_url, "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                }
+                uploaded = upload_image(image_response.content, slug, content_type, attribution)
+                if not uploaded: return None
+                url, storage = uploaded
+                return {"url": url, "page": page_url, "credit": attribution["creator"],
+                        "license": license_name, "license_url": attribution["license_url"], "storage": storage}
+        print(f"No suitable freely reusable Commons image found after {len(queries)} searches for: {topic}")
     except Exception as exc: print(f"Image retrieval warning for '{topic}': {exc}")
     return None
 
