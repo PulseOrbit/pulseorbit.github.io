@@ -5,6 +5,7 @@ on:
     paths:
       - 'posts/index.json'
       - 'scripts/build_site.py'
+      - 'scripts/generate.py'
       - 'assets/js/**'
       - 'assets/css/**'
       - 'index.html'
