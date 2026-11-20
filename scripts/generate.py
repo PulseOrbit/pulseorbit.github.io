@@ -1,154 +1,130 @@
-import os, json, re, html, hashlib, datetime, requests, xml.etree.ElementTree as ET
+import os, json, re, html, hashlib, datetime, mimetypes, time
 from pathlib import Path
+from urllib.parse import quote
+import requests
+from huggingface_hub import HfApi
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "posts" / "index.json"
+IMAGE_DIR = ROOT / "assets" / "images" / "posts"
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 MODEL_OVERRIDE = os.environ.get("GEMINI_MODEL", "").strip()
+HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+HF_DATASET_REPO = os.environ.get("HF_DATASET_REPO", "AhyanCreationsLTD/pulseorbit-images").strip()
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "PulseOrbitPublisher/1.1 (https://pulseorbit.github.io)"})
+SESSION.headers.update({"User-Agent": "PulseOrbitPublisher/2.0 (https://pulseorbit.github.io)"})
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 def checked(response, label):
     if not response.ok:
-        try:
-            detail = response.json().get("error", {}).get("message", response.text[:1200])
-        except Exception:
-            detail = response.text[:1200]
+        try: detail = response.json().get("error", {}).get("message", response.text[:1000])
+        except Exception: detail = response.text[:1000]
         raise RuntimeError(f"{label} failed (HTTP {response.status_code}): {detail}")
     return response
 
 def get_trends():
-    url = "https://trends.google.com/trending/rss?geo=US"
-    response = checked(SESSION.get(url, timeout=30), "Google Trends RSS")
+    response = checked(SESSION.get("https://trends.google.com/trending/rss?geo=US", timeout=30), "Google Trends RSS")
+    import xml.etree.ElementTree as ET
     root = ET.fromstring(response.content)
     items = []
     for item in root.findall(".//item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        if title and link:
-            items.append({"title": title, "url": link})
-    if not items:
-        raise RuntimeError("Google Trends RSS returned no topics. No posts were published.")
+        title, link = (item.findtext("title") or "").strip(), (item.findtext("link") or "").strip()
+        if title and link: items.append({"title": title, "url": link})
+    if not items: raise RuntimeError("Google Trends RSS returned no topics; no posts were published.")
     return items
 
 def available_models():
     response = checked(SESSION.get(f"{BASE}/models", params={"key": API_KEY, "pageSize": 1000}, timeout=30), "Gemini model discovery")
-    models = response.json().get("models", [])
-    usable = {
-        item.get("name", "").removeprefix("models/")
-        for item in models
-        if "generateContent" in item.get("supportedGenerationMethods", [])
-    }
-    preferred = [
-        "gemini-3.8-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.5-flash",
-        "gemini-2.5-flash"
-    ]
-    ordered = [name for name in preferred if name in usable]
-    ordered.extend(sorted(usable - set(ordered)))
+    usable = {m.get("name", "").removeprefix("models/") for m in response.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])}
+    preferred = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+    ordered = [m for m in preferred if m in usable] + sorted(usable - set(preferred))
     if MODEL_OVERRIDE:
         override = MODEL_OVERRIDE.removeprefix("models/")
-        ordered = [override] + [name for name in ordered if name != override]
-    if not ordered:
-        raise RuntimeError("This Gemini API key has no models supporting generateContent. Check the key's project and Gemini API access.")
+        ordered = [override] + [m for m in ordered if m != override]
+    if not ordered: raise RuntimeError("No Gemini model supporting generateContent is available for this API key.")
     return ordered
 
 def gemini_json(prompt):
-    if not API_KEY:
-        raise RuntimeError("Missing GEMINI_API_KEY. Add it under Repository Settings → Secrets and variables → Actions.")
-    transient_statuses = {429, 500, 502, 503, 504}
+    if not API_KEY: raise RuntimeError("Missing GEMINI_API_KEY GitHub Actions secret.")
     failures = []
     for model in available_models():
         endpoint = f"{BASE}/models/{model}:generateContent"
-        for attempt, delay in enumerate((0, 3, 8), start=1):
-            if delay:
-                import time
-                print(f"Gemini {model}: waiting {delay}s before retry {attempt}/3")
-                time.sleep(delay)
+        for delay in (0, 4, 10):
+            if delay: time.sleep(delay)
             try:
                 response = SESSION.post(endpoint, params={"key": API_KEY}, json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 8192}
                 }, timeout=120)
-                if response.status_code in transient_statuses:
-                    detail = response.text[:800]
-                    failures.append(f"{model} attempt {attempt}: HTTP {response.status_code} {detail}")
-                    print(f"Gemini {model} temporarily unavailable (HTTP {response.status_code}); retrying if possible.")
+                if response.status_code in (429, 500, 502, 503, 504):
+                    failures.append(f"{model}: HTTP {response.status_code}")
                     continue
-                checked(response, f"Gemini generateContent ({model})")
-                payload = response.json()
-                candidates = payload.get("candidates") or []
-                if not candidates:
-                    raise RuntimeError("Gemini returned no candidates. Check API quota, safety filtering, and model availability.")
-                parts = candidates[0].get("content", {}).get("parts", [])
-                raw = "".join(part.get("text", "") for part in parts)
+                checked(response, f"Gemini ({model})")
+                candidates = response.json().get("candidates") or []
+                raw = "".join(p.get("text", "") for p in candidates[0].get("content", {}).get("parts", [])) if candidates else ""
                 match = re.search(r"\{.*\}", raw, re.S)
-                if not match:
-                    finish_reason = candidates[0].get("finishReason", "unknown")
-                    failures.append(f"{model} attempt {attempt}: no complete JSON (finishReason={finish_reason})")
-                    print(f"Gemini {model} returned incomplete JSON (finishReason={finish_reason}); retrying.")
-                    continue
-                try:
-                    return json.loads(match.group(0))
-                except json.JSONDecodeError as exc:
-                    failures.append(f"{model} attempt {attempt}: malformed JSON ({exc})")
-                    print(f"Gemini {model} returned malformed JSON; retrying.")
-                    continue
-            except requests.RequestException as exc:
-                failures.append(f"{model} attempt {attempt}: {exc}")
-                print(f"Gemini {model} network error: {exc}")
-                continue
-        print(f"Gemini model {model} exhausted retries; trying another available model.")
-    summary = " | ".join(failures[-8:])
-    raise RuntimeError(f"All available Gemini models failed after retries. Last errors: {summary}")
+                if match:
+                    try: return json.loads(match.group(0))
+                    except json.JSONDecodeError: failures.append(f"{model}: malformed JSON")
+            except requests.RequestException as exc: failures.append(f"{model}: {exc}")
+        print(f"Gemini model {model} failed; trying another model.")
+    raise RuntimeError("All Gemini models failed: " + " | ".join(failures[-8:]))
 
-def commons_image(topic):
-    """Find a reusable Wikimedia Commons image and preserve its attribution."""
+def plain(value):
+    return html.unescape(re.sub(r"<[^>]*>", "", str(value or ""))).strip()
+
+def upload_image(image_bytes, slug, content_type, attribution):
+    ext = mimetypes.guess_extension(content_type) or ".jpg"
+    if ext == ".jpe": ext = ".jpg"
+    digest = hashlib.sha256(image_bytes).hexdigest()[:12]
+    filename = f"{slug[:55]}-{digest}{ext}"
+    if HF_TOKEN:
+        api = HfApi(token=HF_TOKEN)
+        api.upload_file(path_or_fileobj=image_bytes, path_in_repo=f"images/{filename}",
+                        repo_id=HF_DATASET_REPO, repo_type="dataset",
+                        commit_message=f"Add licensed article image {slug[:55]}")
+        metadata = json.dumps(attribution, ensure_ascii=False, indent=2).encode("utf-8")
+        api.upload_file(path_or_fileobj=metadata, path_in_repo=f"metadata/{filename}.json",
+                        repo_id=HF_DATASET_REPO, repo_type="dataset",
+                        commit_message=f"Add image attribution metadata {slug[:55]}")
+        return f"https://huggingface.co/datasets/{HF_DATASET_REPO}/resolve/main/images/{quote(filename)}", "huggingface"
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    (IMAGE_DIR / filename).write_bytes(image_bytes)
+    return f"/assets/images/posts/{quote(filename)}", "repository"
+
+def commons_image(topic, slug):
     api = "https://commons.wikimedia.org/w/api.php"
-    headers = {"Accept": "application/json"}
     try:
-        search = checked(SESSION.get(api, params={
-            "action": "query", "format": "json", "list": "search",
-            "srsearch": str(topic), "srnamespace": 6, "srlimit": 15
-        }, headers=headers, timeout=35), "Wikimedia Commons search")
-        results = search.json().get("query", {}).get("search", [])
-        pageids = [str(item.get("pageid")) for item in results if item.get("pageid")]
-        if not pageids:
-            print(f"No Commons image results for: {topic}")
-            return None
-        details = checked(SESSION.get(api, params={
-            "action": "query", "format": "json", "pageids": "|".join(pageids),
-            "prop": "imageinfo", "iiprop": "url|extmetadata|mime",
-            "iiurlwidth": 1400
-        }, headers=headers, timeout=35), "Wikimedia Commons image metadata")
-        pages = details.json().get("query", {}).get("pages", {})
-        allowed = ("CC0", "CC BY", "CC BY-SA", "Public domain", "Public Domain")
-        for page in pages.values():
+        response = checked(SESSION.get(api, params={
+            "action": "query", "format": "json", "generator": "search",
+            "gsrsearch": str(topic)[:180], "gsrnamespace": 6, "gsrlimit": 12,
+            "prop": "imageinfo", "iiprop": "url|extmetadata|mime", "iiurlwidth": 1400
+        }, timeout=35), "Wikimedia Commons search")
+        pages = sorted(response.json().get("query", {}).get("pages", {}).values(), key=lambda p: p.get("index", 999))
+        for page in pages:
             info = (page.get("imageinfo") or [{}])[0]
             meta = info.get("extmetadata") or {}
-            license_name = html.unescape(re.sub("<[^>]+>", "", (meta.get("LicenseShortName") or {}).get("value", ""))).strip()
-            artist = html.unescape(re.sub("<[^>]+>", "", (meta.get("Artist") or {}).get("value", ""))).strip()
-            license_url = (meta.get("LicenseUrl") or {}).get("value", "")
+            license_name = plain((meta.get("LicenseShortName") or {}).get("value"))
+            lic = license_name.lower().strip()
+            allowed = lic.startswith("cc0") or "public domain" in lic or bool(re.match(r"^cc by(?:-sa)?(?:\s|$)", lic))
+            image_url, page_url = info.get("thumburl") or info.get("url"), info.get("descriptionurl", "")
             mime = (info.get("mime") or "").lower()
-            image_url = info.get("thumburl") or info.get("url")
-            page_url = info.get("descriptionurl", "")
-            if not image_url or not page_url or not license_name:
-                continue
-            if not any(term.lower() in license_name.lower() for term in allowed):
-                continue
-            if mime and not mime.startswith("image/"):
-                continue
-            return {
-                "url": image_url, "page": page_url,
-                "credit": artist or "Wikimedia Commons contributor",
-                "license": license_name, "license_url": license_url
+            if not allowed or not image_url or not page_url or not mime.startswith("image/"): continue
+            image_response = checked(SESSION.get(image_url, timeout=45), "Commons image download")
+            content_type = image_response.headers.get("Content-Type", "").split(";")[0].lower()
+            if not content_type.startswith("image/") or len(image_response.content) > MAX_IMAGE_BYTES: continue
+            attribution = {
+                "title": plain(page.get("title")),
+                "creator": plain((meta.get("Artist") or {}).get("value")) or "Wikimedia Commons contributor",
+                "license": license_name, "license_url": (meta.get("LicenseUrl") or {}).get("value", ""),
+                "source_page": page_url, "retrieved_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
             }
-        print(f"Commons results had no supported reusable licence for: {topic}")
-    except Exception as exc:
-        print(f"Wikimedia Commons image search warning: {exc}")
+            url, storage = upload_image(image_response.content, slug, content_type, attribution)
+            return {"url": url, "page": page_url, "credit": attribution["creator"],
+                    "license": license_name, "license_url": attribution["license_url"], "storage": storage}
+        print(f"No suitable freely reusable Commons image found for: {topic}")
+    except Exception as exc: print(f"Image retrieval warning for '{topic}': {exc}")
     return None
 
 def slugify(value):
@@ -156,37 +132,31 @@ def slugify(value):
     return slug[:75] or hashlib.sha1(value.encode()).hexdigest()[:12]
 
 def make_article(trend, existing_titles):
-    prompt = f"""You are the careful editor of PulseOrbit, an English-language global explainer publication.
-Create one original, useful, balanced article about this currently trending topic: {trend['title']!r}.
-Discovery link: {trend['url']}
-Do not treat a trend as proof. Do not invent facts, quotes, numbers, dates, causes or events. Do not invent sources or claim research you did not perform. Avoid advice in high-stakes areas. Write natural, clear English for a general audience. Do not copy source wording.
-Return JSON only with keys:
-title (accurate, <=90 chars), description (one sentence), category (Technology, Science, Business, or Culture), content (exactly 5 objects with heading and text; each text 70-100 words), image_query (concrete visual search phrase), image_alt (accurate short alt text), sources (array containing only the supplied discovery URL; do not invent URLs).
-Existing titles to avoid: {json.dumps(existing_titles[:100])}
+    prompt = f"""You are PulseOrbit's careful English-language explainer editor.
+Write one original, balanced and useful explainer about: {trend['title']!r}
+Discovery page: {trend['url']}
+A trending query is not evidence. Never invent facts, statistics, quotations, dates, sources or events. Qualify uncertainty. Do not provide personalized financial, medical or legal advice. Do not copy source text.
+Return JSON only with keys: title (<=90 chars), description (one sentence), category (Technology, Science, Business, or Culture), content (exactly 5 objects with heading and text; each text 70-100 words), image_query (visual search phrase), image_alt (accurate concise alt text).
+Avoid these existing titles: {json.dumps(existing_titles[:100])}
 """
     return gemini_json(prompt)
 
 def main():
-    if not INDEX.exists():
-        raise RuntimeError(f"Posts index not found: {INDEX}")
+    if not INDEX.exists(): raise RuntimeError(f"Missing posts index: {INDEX}")
     data = json.loads(INDEX.read_text(encoding="utf-8"))
     posts = data.get("posts", [])
-    titles = [p.get("title", "") for p in posts]
-    # Backfill a relevant Commons image for recent stories that previously used the placeholder.
-    refreshed = 0
-    for old_post in posts:
-        if refreshed >= 5:
-            break
-        if old_post.get("image") == "assets/images/placeholder.svg":
-            candidate = commons_image(old_post.get("title", ""))
+    if not isinstance(posts, list): raise ValueError("posts/index.json must contain a posts array.")
+    titles = [str(p.get("title", "")) for p in posts]
+    backfilled = 0
+    for old in posts:
+        if backfilled >= 4: break
+        if str(old.get("image", "")).endswith("placeholder.svg"):
+            candidate = commons_image(old.get("title", ""), old.get("slug", "story"))
             if candidate:
-                old_post["image"] = candidate["url"]
-                old_post["image_credit"] = f"{candidate['credit']} — {candidate['license']}"
-                old_post["image_source"] = candidate["page"]
-                old_post["image_license_url"] = candidate["license_url"]
-                old_post["sources"] = old_post.get("sources", []) + [{"title": "Image source and licence", "url": candidate["page"]}]
-                refreshed += 1
-                print(f"Added Commons image for existing story: {old_post.get('title')}")
+                old.update({"image": candidate["url"], "image_credit": f"{candidate['credit']} — {candidate['license']}",
+                            "image_source": candidate["page"], "image_license_url": candidate["license_url"],
+                            "image_storage": candidate["storage"]})
+                backfilled += 1
     trends = get_trends()
     selected, seen = [], set()
     for trend in trends:
@@ -194,52 +164,43 @@ def main():
         duplicate = any(key == old.casefold() or key in old.casefold() or old.casefold() in key for old in titles if old)
         if key not in seen and not duplicate:
             selected.append(trend); seen.add(key)
-        if len(selected) == 2:
-            break
-    if len(selected) != 2:
-        raise RuntimeError(f"Only {len(selected)} distinct eligible trends found; refusing to publish fewer than two posts.")
+        if len(selected) == 2: break
+    if len(selected) != 2: raise RuntimeError(f"Only {len(selected)} distinct eligible trends found; refusing partial publication.")
     today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-    new_posts, existing_slugs = [], {p.get("slug") for p in posts}
+    new_posts, slugs = [], {p.get("slug") for p in posts}
     for trend in selected:
         article = make_article(trend, titles)
         title = str(article.get("title", "")).strip()
-        if not title or len(title) > 100:
-            raise ValueError("Generated title is missing or too long.")
+        if not title or len(title) > 100: raise ValueError("Generated title missing or too long.")
         blocks = article.get("content") or []
-        if len(blocks) < 5:
-            raise ValueError(f"Article '{title}' is too short; refusing to publish.")
-        body = []
-        word_count = 0
+        if len(blocks) != 5: raise ValueError(f"Article '{title}' must have exactly five sections.")
+        body, words = [], 0
         for block in blocks:
-            heading = html.escape(str(block.get("heading", "")).strip())
-            paragraph_text = str(block.get("text", "")).strip()
-            word_count += len(paragraph_text.split())
-            paragraph = html.escape(paragraph_text).replace("\n", "<br>")
-            if heading and paragraph:
-                body.append(f"<h2>{heading}</h2><p>{paragraph}</p>")
-        if word_count < 350:
-            raise ValueError(f"Article '{title}' is under 350 words; refusing to publish.")
+            heading, paragraph = str(block.get("heading", "")).strip(), str(block.get("text", "")).strip()
+            words += len(paragraph.split())
+            if not heading or not paragraph: raise ValueError(f"Article '{title}' contains an empty section.")
+            body.append(f"<h2>{html.escape(heading)}</h2><p>{html.escape(paragraph).replace(chr(10), '<br>')}</p>")
+        if words < 350: raise ValueError(f"Article '{title}' is too short ({words} words).")
         slug = slugify(title)
-        if slug in existing_slugs:
-            slug += "-" + hashlib.sha1(trend["title"].encode()).hexdigest()[:6]
-        image = commons_image(str(article.get("image_query") or trend["title"]))
-        sources = [{"title":"Google Trends topic discovery","url":trend["url"]}]
-        if image and image.get("page"):
-            sources.append({"title":"Image source and license","url":image["page"]})
-        post = {
-            "slug":slug,"title":title,"description":str(article.get("description","")).strip(),
-            "category":article.get("category") if article.get("category") in {"Technology","Science","Business","Culture"} else "Culture",
-            "date":today,"read_time":f"{max(3, word_count//220)} min read","content_html":"\n".join(body),
-            "image":image["url"] if image else "assets/images/placeholder.svg",
-            "image_alt":str(article.get("image_alt") or title),
-            "image_credit":(f"{image['credit']} — {image['license']}" if image else "PulseOrbit abstract placeholder"),
-            "image_source":image["page"] if image else "",
-            "image_license_url":image["license_url"] if image else "",
-            "sources":sources
-        }
-        new_posts.append(post); existing_slugs.add(slug); titles.append(title)
-    INDEX.write_text(json.dumps({"posts":new_posts+posts},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-    print("Prepared exactly two articles:", " | ".join(p["title"] for p in new_posts))
+        if slug in slugs: slug += "-" + hashlib.sha1(trend["title"].encode()).hexdigest()[:6]
+        slugs.add(slug)
+        image = commons_image(str(article.get("image_query") or trend["title"]), slug)
+        category = article.get("category")
+        if category not in {"Technology", "Science", "Business", "Culture"}: category = "Culture"
+        new_posts.append({
+            "slug": slug, "title": title, "description": str(article.get("description", "")).strip(),
+            "category": category, "date": today, "read_time": f"{max(3, words // 220)} min read",
+            "content_html": "\n".join(body),
+            "image": image["url"] if image else "/assets/images/placeholder.svg",
+            "image_alt": str(article.get("image_alt") or title),
+            "image_credit": f"{image['credit']} — {image['license']}" if image else "PulseOrbit",
+            "image_source": image["page"] if image else "",
+            "image_license_url": image["license_url"] if image else "",
+            "image_storage": image["storage"] if image else "placeholder",
+            "sources": [{"title": "Google Trends topic discovery", "url": trend["url"]}]
+        })
+    INDEX.write_text(json.dumps({"posts": new_posts + posts}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print("Prepared:", " | ".join(p["title"] for p in new_posts))
 
 if __name__ == "__main__":
     main()

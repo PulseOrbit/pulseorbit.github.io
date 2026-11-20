@@ -1,27 +1,28 @@
 # PulseOrbit
 
-A responsive, static editorial website hosted on GitHub Pages.
+Responsive editorial website hosted on GitHub Pages.
 
-## Structure
+## Daily publishing
+The scheduled workflow runs daily at 07:30 Bangladesh time. It drafts two explainers with Gemini, validates article structure, searches Wikimedia Commons for reusable images, downloads selected images, and uploads them to the public Hugging Face dataset:
 
-- `index.html` — home page
-- `assets/` — styles, scripts, brand artwork
-- `posts/index.json` — article data source
-- `posts/<slug>/index.html` — generated, crawlable article pages
-- `scripts/` — article builder and AI publisher
-- `.github/workflows/` — publishing and build automation
+https://huggingface.co/datasets/AhyanCreationsLTD/pulseorbit-images
 
-## Daily AI publishing
+Each image has a metadata JSON file recording creator, source page, licence, licence URL, and retrieval date. Only CC0, CC BY, CC BY-SA, and public-domain results are considered. If no suitable image is found, the site uses its local placeholder.
 
-The daily workflow runs at 07:30 Bangladesh time. Add a repository Actions secret named `GEMINI_API_KEY`. The publisher discovers available Gemini models, drafts two original explainers from Google Trends, searches Wikimedia Commons for images with reusable licenses, and records attribution in article metadata.
+## GitHub Actions configuration
+Required repository Actions secrets:
+- GEMINI_API_KEY — Gemini API key
+- HF_TOKEN — Hugging Face token with write access to the dataset
 
-Run it manually from **Actions → PulseOrbit daily publishing → Run workflow**.
+Optional Actions variable:
+- GEMINI_MODEL — preferred Gemini model name; automatic model discovery is used if empty
 
-## Build locally
+The dataset repository ID is configured in the workflow. Never put API keys or tokens in frontend JavaScript or committed files.
 
+Run publishing manually from Actions → PulseOrbit daily publishing → Run workflow.
+
+## Local build
 ```bash
 python -m pip install -r requirements.txt
 python scripts/build_site.py
 ```
-
-The site uses no frontend build system. GitHub Pages can publish the repository root from the `main` branch.
