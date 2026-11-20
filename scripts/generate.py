@@ -1,6 +1,7 @@
 import os, json, re, html, hashlib, datetime, mimetypes, time
 from pathlib import Path
 from urllib.parse import quote
+import io
 import requests
 from huggingface_hub import HfApi
 
@@ -84,9 +85,9 @@ def upload_image(image_bytes, slug, content_type, attribution):
     digest = hashlib.sha256(image_bytes).hexdigest()[:12]
     filename = f'{slug[:55]}-{digest}{ext}'
     api = HfApi(token=HF_TOKEN)
-    api.upload_file(path_or_fileobj=image_bytes, path_in_repo=f'images/{filename}', repo_id=HF_DATASET_REPO, repo_type='dataset', commit_message=f'Add licensed article image {slug[:55]}')
+    api.upload_file(path_or_fileobj=io.BytesIO(image_bytes), path_in_repo=f'images/{filename}', repo_id=HF_DATASET_REPO, repo_type='dataset', commit_message=f'Add licensed article image {slug[:55]}')
     metadata = json.dumps(attribution, ensure_ascii=False, indent=2).encode('utf-8')
-    api.upload_file(path_or_fileobj=metadata, path_in_repo=f'metadata/{filename}.json', repo_id=HF_DATASET_REPO, repo_type='dataset', commit_message=f'Add image attribution metadata {slug[:55]}')
+    api.upload_file(path_or_fileobj=io.BytesIO(metadata), path_in_repo=f'metadata/{filename}.json', repo_id=HF_DATASET_REPO, repo_type='dataset', commit_message=f'Add image attribution metadata {slug[:55]}')
     return f'https://huggingface.co/datasets/{HF_DATASET_REPO}/resolve/main/images/{quote(filename)}', 'huggingface'
 
 def pixabay_search_topic(topic):
