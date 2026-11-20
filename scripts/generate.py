@@ -172,6 +172,21 @@ def main():
     data = json.loads(INDEX.read_text(encoding="utf-8"))
     posts = data.get("posts", [])
     titles = [p.get("title", "") for p in posts]
+    # Backfill a relevant Commons image for recent stories that previously used the placeholder.
+    refreshed = 0
+    for old_post in posts:
+        if refreshed >= 5:
+            break
+        if old_post.get("image") == "assets/images/placeholder.svg":
+            candidate = commons_image(old_post.get("title", ""))
+            if candidate:
+                old_post["image"] = candidate["url"]
+                old_post["image_credit"] = f"{candidate['credit']} — {candidate['license']}"
+                old_post["image_source"] = candidate["page"]
+                old_post["image_license_url"] = candidate["license_url"]
+                old_post["sources"] = old_post.get("sources", []) + [{"title": "Image source and licence", "url": candidate["page"]}]
+                refreshed += 1
+                print(f"Added Commons image for existing story: {old_post.get('title')}")
     trends = get_trends()
     selected, seen = [], set()
     for trend in trends:
