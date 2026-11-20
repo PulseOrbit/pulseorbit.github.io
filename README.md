@@ -1,37 +1,32 @@
 # PulseOrbit
 
-A responsive editorial blog published with GitHub Pages and automated daily publishing.
+A responsive editorial website hosted on GitHub Pages.
 
-## Website
-- URL: https://pulseorbit.github.io
-- Responsive layout, category filters, search, article reader, and light/dark theme.
-- Article data is stored in `posts/index.json`.
+## Daily publishing
+- GitHub Actions generates two draft stories each day at 07:30 Bangladesh time.
+- Add `GEMINI_API_KEY` under **Settings → Secrets and variables → Actions → New repository secret**.
+- The publishing workflow creates crawlable static article pages and refreshes `sitemap.xml`.
+- Review factual claims and sources before relying on or sharing an article. Trending-topic discovery alone is not independent reporting.
 
-## Enable GitHub Pages
-1. Open **Settings → Pages**.
-2. Select **Deploy from a branch**.
-3. Choose branch **main** and folder **/(root)**, then save.
+## Language
+The site interface supports English and Bangla. Article text is currently published in English.
 
-## Configure AI publishing
-1. Open **Settings → Secrets and variables → Actions**.
-2. Add a repository secret named `GEMINI_API_KEY` containing a Gemini API key.
-3. Optional: add an Actions variable named `GEMINI_MODEL` to pin a model that your API key supports and that supports `generateContent`. If omitted, the publisher discovers available models and chooses a preferred current Flash model automatically.
-4. Open **Actions → PulseOrbit daily publishing** and run it manually to test.
+## Images
+The publisher searches Wikimedia Commons for images and stores attribution and licence information. If no suitable openly licensed image is found, it uses the local placeholder. Check every image licence before reuse.
 
-The schedule is 01:30 UTC (07:30 Bangladesh time). Each successful run attempts to publish exactly two distinct articles. If it cannot create two sufficiently complete articles, it stops rather than publishing filler.
+## Reader counts (optional)
+PulseOrbit uses GoatCounter for privacy-friendly per-page view counts.
+1. Create a GoatCounter site for `pulseorbit.github.io`.
+2. In `assets/js/config.js`, set `window.PULSEORBIT_GOATCOUNTER_URL` to your site's public count endpoint, for example `https://YOUR-CODE.goatcounter.com/count`.
+3. Enable **Allow adding visitor counts on your website** in GoatCounter site settings.
+4. Commit the config change. View counts will then appear on article pages.
+Do not put an API key or private token in this public repository.
 
-## AI model selection and troubleshooting
-The publisher first calls the Gemini models list endpoint and selects a model available to the configured key that supports `generateContent`. It prefers current Flash models and reports the HTTP status and API error message if model discovery or generation fails.
+## SEO
+- Each article has a static URL, canonical URL, Open Graph/Twitter metadata, Article structured data, and is listed in the sitemap.
+- `PulseOrbit SEO health check` runs weekly and can also be started manually from Actions.
+- Submit `https://pulseorbit.github.io/sitemap.xml` in Google Search Console and Bing Webmaster Tools.
+- Search rankings are not guaranteed. Publish accurate, original, useful articles and earn relevant links naturally. Do not use automated link farms, bulk directory submissions, or paid ranking links.
 
-- HTTP 400: inspect the request or model response details in the Actions log.
-- HTTP 401/403: verify the API key, project access and API availability.
-- HTTP 404: verify that the selected model is available to this key and supports `generateContent`; remove an optional `GEMINI_MODEL` variable to use automatic discovery.
-- HTTP 429: the API quota or rate limit was reached; check the provider's quota page and retry later.
-
-Never place API keys in source files or commit them to Git.
-
-## Images and attribution
-The publisher searches Wikimedia Commons for a topic-related image and stores the image page, creator and license metadata. If no suitable openly licensed image is found, the article uses a local abstract placeholder. Retain image attribution and license links.
-
-## Editorial note
-Trend discovery is not independent fact verification. Review source links and generated articles before relying on or sharing factual claims. AI output can contain errors.
+## Contact
+support@ahyancreations.top
