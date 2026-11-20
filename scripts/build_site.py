@@ -13,7 +13,7 @@ def build_post(post):
     slug = re.sub(r"[^a-z0-9-]", "", post.get("slug", ""))
     if not slug:
         return None
-    url = f"{BASE}/{slug}/"
+    url = f"{BASE}/posts/{slug}/"
     title = esc(post.get("title", "PulseOrbit story"))
     description = esc(post.get("description", ""))
     image = post.get("image", "/assets/images/placeholder.svg")
@@ -38,10 +38,27 @@ def main():
         if not page:
             continue
         slug = re.sub(r"[^a-z0-9-]", "", post["slug"])
-        folder = ROOT / slug
+        # Keep every article page together under /posts/<slug>/.
+        folder = ROOT / "posts" / slug
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "index.html").write_text(page, encoding="utf-8")
-        urls.append(f"{BASE}/{slug}/")
+
+        # Preserve old article URLs with a lightweight redirect.
+        legacy_folder = ROOT / slug
+        legacy_folder.mkdir(parents=True, exist_ok=True)
+        legacy_url = f"/posts/{slug}/"
+        redirect = (
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta http-equiv="refresh" content="0;url={legacy_url}">'
+            f'<link rel="canonical" href="{BASE}{legacy_url}">'
+            '<title>Moving article | PulseOrbit</title>'
+            f'<script>location.replace("{legacy_url}");</script>'
+            '</head><body><p>This article has moved. '
+            f'<a href="{legacy_url}">Continue to the article</a>.</p></body></html>'
+        )
+        (legacy_folder / "index.html").write_text(redirect, encoding="utf-8")
+        urls.append(url)
     entries = "".join(f"<url><loc>{html.escape(url)}</loc></url>" for url in urls)
     sitemap = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + entries + '</urlset>\n'
     (ROOT / "sitemap.xml").write_text(sitemap, encoding="utf-8")
