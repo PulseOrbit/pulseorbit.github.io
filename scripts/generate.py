@@ -134,7 +134,7 @@ Create one original, useful, balanced article about this currently trending topi
 Discovery link: {trend['url']}
 Do not treat a trend as proof. Do not invent facts, quotes, numbers, dates, causes or events. Do not invent sources or claim research you did not perform. Avoid advice in high-stakes areas. Write natural, clear English for a general audience. Do not copy source wording.
 Return JSON only with keys:
-title (accurate, <=90 chars), description (one sentence), category (Technology, Science, Business, or Culture), content (5-7 objects with heading and text; each text 80-150 words), image_query (concrete visual search phrase), image_alt (accurate short alt text), sources (array containing only the supplied discovery URL; do not invent URLs).
+title (accurate, <=90 chars), description (one sentence), category (Technology, Science, Business, or Culture), content (exactly 5 objects with heading and text; each text 70-100 words), image_query (concrete visual search phrase), image_alt (accurate short alt text), sources (array containing only the supplied discovery URL; do not invent URLs).
 Existing titles to avoid: {json.dumps(existing_titles[:100])}
 """
     return gemini_json(prompt)
