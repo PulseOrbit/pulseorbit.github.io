@@ -106,22 +106,49 @@ def gemini_json(prompt):
     raise RuntimeError(f"All available Gemini models failed after retries. Last errors: {summary}")
 
 def commons_image(topic):
-    params = {"action":"query","format":"json","generator":"search","gsrsearch":"filetype:bitmap " + topic,
-              "gsrnamespace":6,"gsrlimit":10,"prop":"imageinfo","iiprop":"url|extmetadata","iiurlwidth":1400}
+    """Find a reusable Wikimedia Commons image and preserve its attribution."""
+    api = "https://commons.wikimedia.org/w/api.php"
+    headers = {"Accept": "application/json"}
     try:
-        response = checked(SESSION.get("https://commons.wikimedia.org/w/api.php", params=params, timeout=30), "Wikimedia Commons image search")
-        pages = (response.json().get("query") or {}).get("pages") or {}
+        search = checked(SESSION.get(api, params={
+            "action": "query", "format": "json", "list": "search",
+            "srsearch": str(topic), "srnamespace": 6, "srlimit": 15
+        }, headers=headers, timeout=35), "Wikimedia Commons search")
+        results = search.json().get("query", {}).get("search", [])
+        pageids = [str(item.get("pageid")) for item in results if item.get("pageid")]
+        if not pageids:
+            print(f"No Commons image results for: {topic}")
+            return None
+        details = checked(SESSION.get(api, params={
+            "action": "query", "format": "json", "pageids": "|".join(pageids),
+            "prop": "imageinfo", "iiprop": "url|extmetadata|mime",
+            "iiurlwidth": 1400
+        }, headers=headers, timeout=35), "Wikimedia Commons image metadata")
+        pages = details.json().get("query", {}).get("pages", {})
+        allowed = ("CC0", "CC BY", "CC BY-SA", "Public domain", "Public Domain")
         for page in pages.values():
             info = (page.get("imageinfo") or [{}])[0]
             meta = info.get("extmetadata") or {}
             license_name = html.unescape(re.sub("<[^>]+>", "", (meta.get("LicenseShortName") or {}).get("value", ""))).strip()
             artist = html.unescape(re.sub("<[^>]+>", "", (meta.get("Artist") or {}).get("value", ""))).strip()
-            if info.get("thumburl") and license_name:
-                return {"url":info["thumburl"],"page":info.get("descriptionurl",""),
-                        "credit":artist or "Wikimedia Commons contributor","license":license_name,
-                        "license_url":(meta.get("LicenseUrl") or {}).get("value","")}
+            license_url = (meta.get("LicenseUrl") or {}).get("value", "")
+            mime = (info.get("mime") or "").lower()
+            image_url = info.get("thumburl") or info.get("url")
+            page_url = info.get("descriptionurl", "")
+            if not image_url or not page_url or not license_name:
+                continue
+            if not any(term.lower() in license_name.lower() for term in allowed):
+                continue
+            if mime and not mime.startswith("image/"):
+                continue
+            return {
+                "url": image_url, "page": page_url,
+                "credit": artist or "Wikimedia Commons contributor",
+                "license": license_name, "license_url": license_url
+            }
+        print(f"Commons results had no supported reusable licence for: {topic}")
     except Exception as exc:
-        print(f"Image search warning: {exc}")
+        print(f"Wikimedia Commons image search warning: {exc}")
     return None
 
 def slugify(value):
