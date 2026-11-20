@@ -32,9 +32,7 @@ def get_trends():
         raise RuntimeError("Google Trends RSS returned no topics. No posts were published.")
     return items
 
-def available_model():
-    if MODEL_OVERRIDE:
-        return MODEL_OVERRIDE.removeprefix("models/")
+def available_models():
     response = checked(SESSION.get(f"{BASE}/models", params={"key": API_KEY, "pageSize": 1000}, timeout=30), "Gemini model discovery")
     models = response.json().get("models", [])
     usable = {
@@ -49,35 +47,60 @@ def available_model():
         "gemini-3.5-flash",
         "gemini-2.5-flash"
     ]
-    for name in preferred:
-        if name in usable:
-            return name
-    if usable:
-        return sorted(usable)[0]
-    raise RuntimeError("This Gemini API key has no models supporting generateContent. Check the key's project and Gemini API access.")
+    ordered = [name for name in preferred if name in usable]
+    ordered.extend(sorted(usable - set(ordered)))
+    if MODEL_OVERRIDE:
+        override = MODEL_OVERRIDE.removeprefix("models/")
+        ordered = [override] + [name for name in ordered if name != override]
+    if not ordered:
+        raise RuntimeError("This Gemini API key has no models supporting generateContent. Check the key's project and Gemini API access.")
+    return ordered
 
 def gemini_json(prompt):
     if not API_KEY:
         raise RuntimeError("Missing GEMINI_API_KEY. Add it under Repository Settings → Secrets and variables → Actions.")
-    model = available_model()
-    endpoint = f"{BASE}/models/{model}:generateContent"
-    response = checked(SESSION.post(endpoint, params={"key": API_KEY}, json={
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 7000}
-    }, timeout=120), f"Gemini generateContent ({model})")
-    payload = response.json()
-    candidates = payload.get("candidates") or []
-    if not candidates:
-        raise RuntimeError("Gemini returned no candidates. Check API quota, safety filtering, and model availability.")
-    parts = candidates[0].get("content", {}).get("parts", [])
-    raw = "".join(part.get("text", "") for part in parts)
-    match = re.search(r"\{.*\}", raw, re.S)
-    if not match:
-        raise ValueError(f"Gemini did not return valid JSON. Response preview: {raw[:500]}")
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Gemini returned malformed JSON: {exc}") from exc
+    transient_statuses = {429, 500, 502, 503, 504}
+    failures = []
+    for model in available_models():
+        endpoint = f"{BASE}/models/{model}:generateContent"
+        for attempt, delay in enumerate((0, 3, 8), start=1):
+            if delay:
+                import time
+                print(f"Gemini {model}: waiting {delay}s before retry {attempt}/3")
+                time.sleep(delay)
+            try:
+                response = SESSION.post(endpoint, params={"key": API_KEY}, json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 7000}
+                }, timeout=120)
+                if response.status_code in transient_statuses:
+                    detail = response.text[:800]
+                    failures.append(f"{model} attempt {attempt}: HTTP {response.status_code} {detail}")
+                    print(f"Gemini {model} temporarily unavailable (HTTP {response.status_code}); retrying if possible.")
+                    continue
+                checked(response, f"Gemini generateContent ({model})")
+                payload = response.json()
+                candidates = payload.get("candidates") or []
+                if not candidates:
+                    raise RuntimeError("Gemini returned no candidates. Check API quota, safety filtering, and model availability.")
+                parts = candidates[0].get("content", {}).get("parts", [])
+                raw = "".join(part.get("text", "") for part in parts)
+                match = re.search(r"\\{.*\\}", raw, re.S)
+                if not match:
+                    raise ValueError(f"Gemini did not return valid JSON. Response preview: {raw[:500]}")
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Gemini returned malformed JSON: {exc}") from exc
+            except requests.RequestException as exc:
+                failures.append(f"{model} attempt {attempt}: {exc}")
+                print(f"Gemini {model} network error: {exc}")
+                continue
+            except Exception:
+                raise
+        print(f"Gemini model {model} exhausted retries; trying another available model.")
+    summary = " | ".join(failures[-8:])
+    raise RuntimeError(f"All available Gemini models failed after retries. Last errors: {summary}")
 
 def commons_image(topic):
     params = {"action":"query","format":"json","generator":"search","gsrsearch":"filetype:bitmap " + topic,
