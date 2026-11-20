@@ -58,7 +58,7 @@ def main():
             f'<a href="{legacy_url}">Continue to the article</a>.</p></body></html>'
         )
         (legacy_folder / "index.html").write_text(redirect, encoding="utf-8")
-        urls.append(url)
+        urls.append(f"{BASE}/posts/{slug}/")
     entries = "".join(f"<url><loc>{html.escape(url)}</loc></url>" for url in urls)
     sitemap = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + entries + '</urlset>\n'
     (ROOT / "sitemap.xml").write_text(sitemap, encoding="utf-8")
