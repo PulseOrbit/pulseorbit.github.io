@@ -1,0 +1,21 @@
+name: PulseOrbit SEO checks
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate Python and generated site structure
+        run: |
+          python -m compileall -q scripts
+          python scripts/build_site.py
+          python -c "import xml.etree.ElementTree as E; E.parse('sitemap.xml'); print('Sitemap XML valid')"
+          python -c "import json; d=json.load(open('posts/index.json')); assert isinstance(d.get('posts'),list); print('Post index valid')"
